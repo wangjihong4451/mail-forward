@@ -107,10 +107,20 @@ def save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def imap_connect(cfg: Config) -> imaplib.IMAP4:
-    if cfg.imap_ssl:
+# def imap_connect(cfg: Config) -> imaplib.IMAP4:
+#     if cfg.imap_ssl:
+#         return imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
+#     return imaplib.IMAP4(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
+def imap_connect(cfg: Config):
+    # 逻辑修正：如果配置开启了SSL，或者端口是默认的SSL端口(993)，都强制使用SSL连接
+    use_ssl = cfg.imap_ssl or cfg.imap_port == 993
+    
+    if use_ssl:
+        print(f"Using IMAP SSL connection (Host: {cfg.imap_host}:{cfg.imap_port})")
         return imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
-    return imaplib.IMAP4(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
+    else:
+        print(f"Using IMAP plain connection (Host: {cfg.imap_host}:{cfg.imap_port})")
+        return imaplib.IMAP4(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
 
 
 def smtp_connect(cfg: Config) -> smtplib.SMTP:
