@@ -10,10 +10,10 @@ from email.policy import default
 # --- 配置信息 ---
 IMAP_SERVER = 'imap.gzus.edu.cn'
 IMAP_USER = 'wih@mail.gzus.edu.cn'
-IMAP_PASS = '' 
+IMAP_PASS = os.environ.get("SRC_PASSWORD") 
 SMTP_SERVER = 'smtp.qq.com'
 SMTP_USER = '281793865@qq.com'
-SMTP_PASS = '' 
+SMTP_PASS = os.environ.get("SMTP_PASSWORD") 
 
 def decode_str(s):
     if not s: return ""
