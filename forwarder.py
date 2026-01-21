@@ -211,22 +211,34 @@ def _uids_to_process(imap: imaplib.IMAP4, folder: str, last_uid: Optional[int]) 
     return [int(x) for x in raw.split() if x.isdigit()]
 
 
-def _imap_fetch_header_and_text(imap: imaplib.IMAP4, uid: int) -> tuple[bytes, bytes]:
-    """只获取邮件头部和正文文本，不获取附件"""
-    typ, data = imap.uid("fetch", str(uid), "(BODY.PEEK[HEADER] BODY.PEEK[TEXT])")
+# def _imap_fetch_header_and_text(imap: imaplib.IMAP4, uid: int) -> tuple[bytes, bytes]:
+#     """只获取邮件头部和正文文本，不获取附件"""
+#     typ, data = imap.uid("fetch", str(uid), "(BODY.PEEK[HEADER] BODY.PEEK[TEXT])")
+#     if typ != "OK":
+#         raise RuntimeError(f"IMAP fetch failed for uid={uid}: {(typ, data)}")
+    
+#     raw_header = b""
+#     raw_body = b""
+#     for part in data:
+#         if isinstance(part, tuple):
+#             if b'HEADER' in part[0]:
+#                 raw_header = part[1]
+#             elif b'TEXT' in part[0]:
+#                 raw_body = part[1]
+    
+#     return raw_header, raw_body
+def _imap_fetch_full_message(imap: imaplib.IMAP4, uid: int) -> bytes:
+    """获取完整邮件内容（包含附件）"""
+    # RFC822 代表获取邮件的原始完整数据
+    typ, data = imap.uid("fetch", str(uid), "(RFC822)")
     if typ != "OK":
         raise RuntimeError(f"IMAP fetch failed for uid={uid}: {(typ, data)}")
     
-    raw_header = b""
-    raw_body = b""
-    for part in data:
-        if isinstance(part, tuple):
-            if b'HEADER' in part[0]:
-                raw_header = part[1]
-            elif b'TEXT' in part[0]:
-                raw_body = part[1]
-    
-    return raw_header, raw_body
+    # 解析返回的数据结构，通常 data[0] 是 (b'uid (RFC822 {size}', b'raw content')
+    for item in data:
+        if isinstance(item, tuple) and len(item) >= 2:
+            return item[1] # 返回原始字节流
+    raise RuntimeError("IMAP FETCH returned no message bytes")
 
 
 def _imap_mark_forwarded(imap: imaplib.IMAP4, uid: int) -> None:
