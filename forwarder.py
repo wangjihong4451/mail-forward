@@ -113,17 +113,22 @@ def save_state(state: dict) -> None:
 #     return imaplib.IMAP4(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
 def imap_connect(cfg: Config) -> imaplib.IMAP4:
     imap_ssl = str(cfg.imap_ssl).lower() in ("1", "true", "yes", "on")
+
     if imap_ssl:
+        print("Using IMAP SSL connection")
         return imaplib.IMAP4_SSL(
             cfg.imap_host,
             cfg.imap_port,
             timeout=cfg.imap_timeout
         )
+
+    print("Using IMAP plain connection")
     return imaplib.IMAP4(
         cfg.imap_host,
         cfg.imap_port,
         timeout=cfg.imap_timeout
     )
+
 
 
 
