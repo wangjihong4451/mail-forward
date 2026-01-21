@@ -107,10 +107,24 @@ def save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# def imap_connect(cfg: Config) -> imaplib.IMAP4:
+#     if cfg.imap_ssl:
+#         return imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
+#     return imaplib.IMAP4(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
 def imap_connect(cfg: Config) -> imaplib.IMAP4:
-    if cfg.imap_ssl:
-        return imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
-    return imaplib.IMAP4(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
+    imap_ssl = str(cfg.imap_ssl).lower() in ("1", "true", "yes", "on")
+    if imap_ssl:
+        return imaplib.IMAP4_SSL(
+            cfg.imap_host,
+            cfg.imap_port,
+            timeout=cfg.imap_timeout
+        )
+    return imaplib.IMAP4(
+        cfg.imap_host,
+        cfg.imap_port,
+        timeout=cfg.imap_timeout
+    )
+
 
 
 def smtp_connect(cfg: Config) -> smtplib.SMTP:
