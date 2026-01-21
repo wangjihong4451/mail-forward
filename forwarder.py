@@ -82,7 +82,7 @@ def load_config() -> Config:
         imap_port=_env_int("IMAP_PORT", 993),
         imap_ssl=_env_bool("IMAP_SSL", True),
         imap_folder=os.getenv("IMAP_FOLDER", "INBOX"),
-        imap_timeout=_env_int("IMAP_TIMEOUT", 30),
+        imap_timeout=_env_int("IMAP_TIMEOUT", 120),
         smtp_user=os.environ["SMTP_USER"],
         smtp_password=os.environ["SMTP_PASSWORD"],
         smtp_host=os.environ["SMTP_HOST"],
@@ -126,7 +126,7 @@ def imap_connect(cfg: Config):
 def smtp_connect(cfg: Config) -> smtplib.SMTP:
     if cfg.smtp_ssl:
         context = ssl.create_default_context()
-        return smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, context=context, timeout=30)
+        return smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, context=context, timeout=120)
     server = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=30)
     server.starttls(context=ssl.create_default_context())
     return server
@@ -152,44 +152,117 @@ def _parse_uid_fetch(data) -> bytes:
     raise RuntimeError("IMAP FETCH returned no message bytes")
 
 
+# def _build_forward_message(
+#     cfg: Config,
+#     raw_header: bytes,
+#     raw_body: bytes,
+#     original_uid: str,
+# ) -> EmailMessage:
+#     """构造转发邮件，只包含头部和正文文本，不包含附件"""
+#     # 解析头部
+#     header_msg = message_from_bytes(raw_header, policy=default)
+#     subject = decode_str(header_msg.get('Subject'))
+#     from_info = decode_str(header_msg.get('From'))
+
+#     # 解析正文
+#     temp_msg = message_from_bytes(raw_body, policy=default)
+#     body_part = temp_msg.get_body(preferencelist=('html', 'plain'))
+    
+#     body_content = ""
+#     is_html = False
+#     if body_part:
+#         body_content = body_part.get_content()
+#         is_html = (body_part.get_content_type() == 'text/html')
+#     else:
+#         body_content = "（无法解析正文内容，请登录网页版查看）"
+
+#     # 构造新邮件
+#     forward_msg = EmailMessage()
+#     forward_msg['Subject'] = f"[通知正文] {subject}"
+#     forward_msg['From'] = cfg.smtp_user
+#     forward_msg['To'] = cfg.dest_email
+    
+#     notice = f"--- 学校邮箱转发 (已自动忽略附件以防断连) ---\n发件人: {from_info}\n主题: {subject}\n\n"
+    
+#     if is_html:
+#         header_html = f"<div style='background:#f9f9f9;padding:10px;border:1px solid #eee'><b>发件人:</b> {from_info}<br><b>主题:</b> {subject}<br><i>[提示] 附件已忽略，请至学校邮箱下载</i></div><br>"
+#         forward_msg.add_alternative(header_html + body_content, subtype='html')
+#     else:
+#         forward_msg.set_content(notice + body_content)
+    
+#     return forward_msg
+# 需要引入 mimetypes 库来判断附件类型（在文件开头添加 import mimetypes）
+import mimetypes 
+
 def _build_forward_message(
     cfg: Config,
-    raw_header: bytes,
-    raw_body: bytes,
+    raw_bytes: bytes,  # 这里接收完整的原始字节
     original_uid: str,
 ) -> EmailMessage:
-    """构造转发邮件，只包含头部和正文文本，不包含附件"""
-    # 解析头部
-    header_msg = message_from_bytes(raw_header, policy=default)
-    subject = decode_str(header_msg.get('Subject'))
-    from_info = decode_str(header_msg.get('From'))
-
-    # 解析正文
-    temp_msg = message_from_bytes(raw_body, policy=default)
-    body_part = temp_msg.get_body(preferencelist=('html', 'plain'))
+    """构造转发邮件，包含附件"""
+    # 1. 解析原始邮件
+    original_msg = message_from_bytes(raw_bytes, policy=default)
     
-    body_content = ""
-    is_html = False
-    if body_part:
-        body_content = body_part.get_content()
-        is_html = (body_part.get_content_type() == 'text/html')
-    else:
-        body_content = "（无法解析正文内容，请登录网页版查看）"
-
-    # 构造新邮件
+    subject = decode_str(original_msg.get('Subject'))
+    from_info = decode_str(original_msg.get('From'))
+    
+    # 2. 创建新邮件对象
     forward_msg = EmailMessage()
-    forward_msg['Subject'] = f"[通知正文] {subject}"
+    forward_msg['Subject'] = f"[转发] {subject}"
     forward_msg['From'] = cfg.smtp_user
     forward_msg['To'] = cfg.dest_email
     
-    notice = f"--- 学校邮箱转发 (已自动忽略附件以防断连) ---\n发件人: {from_info}\n主题: {subject}\n\n"
+    # 3. 提取正文并添加到新邮件
+    # 尝试优先获取 HTML，其次是纯文本
+    body_part = original_msg.get_body(preferencelist=('html', 'plain'))
     
-    if is_html:
-        header_html = f"<div style='background:#f9f9f9;padding:10px;border:1px solid #eee'><b>发件人:</b> {from_info}<br><b>主题:</b> {subject}<br><i>[提示] 附件已忽略，请至学校邮箱下载</i></div><br>"
-        forward_msg.add_alternative(header_html + body_content, subtype='html')
+    notice_text = f"<p style='color:gray;font-size:12px;'>--- 原始发件人: {from_info} ---</p><hr>"
+    
+    if body_part:
+        content = body_part.get_content()
+        ctype = body_part.get_content_type()
+        if ctype == 'text/html':
+            forward_msg.add_alternative(notice_text + content, subtype='html')
+        else:
+            # 纯文本处理
+            forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n\n" + content)
     else:
-        forward_msg.set_content(notice + body_content)
-    
+        forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n(无正文内容)")
+
+    # 4. 遍历并处理附件
+    for part in original_msg.walk():
+        # 跳过 multipart 容器本身
+        if part.get_content_maintype() == 'multipart':
+            continue
+        # 跳过正文部分（因为上面已经处理过了）
+        if part == body_part:
+            continue
+            
+        filename = part.get_filename()
+        if filename:
+            # 解码文件名
+            filename = decode_str(filename)
+            
+            # 获取附件内容
+            payload = part.get_payload(decode=True)
+            if payload:
+                # 猜测 MIME 类型
+                ctype = part.get_content_type()
+                maintype, subtype = ctype.split('/', 1)
+                
+                # 如果猜测失败，给默认值
+                if not maintype: maintype = 'application'
+                if not subtype: subtype = 'octet-stream'
+                
+                # 添加附件到新邮件
+                forward_msg.add_attachment(
+                    payload,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=filename
+                )
+                logging.info(f"Attached file: {filename}")
+
     return forward_msg
 
 
@@ -276,11 +349,15 @@ def process_once(cfg: Config) -> int:
             while attempts < 3 and not success:
                 attempts += 1
                 try:
-                    # 使用新的获取方式，只获取头部和正文文本
-                    raw_header, raw_body = _imap_fetch_header_and_text(imap, uid)
+                    # # 使用新的获取方式，只获取头部和正文文本
+                    # # raw_header, raw_body = _imap_fetch_header_and_text(imap, uid)
+                    # [修改] 获取完整邮件数据
+                    raw_bytes = _imap_fetch_full_message(imap, uid)
                     
                     # 构造转发邮件
-                    fwd = _build_forward_message(cfg, raw_header, raw_body, original_uid=str(uid))
+                    # fwd = _build_forward_message(cfg, raw_header, raw_body, original_uid=str(uid))
+                    # [修改] 构造包含附件的转发邮件
+                    fwd = _build_forward_message(cfg, raw_bytes, original_uid=str(uid))
                     
                     # 发送邮件
                     smtp.send_message(fwd)
