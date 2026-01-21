@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
   schedule:
-    - cron: '0 */2 * * *'  # 每6小时运行一次
+    - cron: '0 */2 * * *'  # 每2小时运行一次
 
 jobs:
   forward-mail:
