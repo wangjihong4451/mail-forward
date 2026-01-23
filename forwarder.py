@@ -4,6 +4,7 @@ import os
 import ssl
 import time
 import re
+import mimetypes  # [新增] 用于正确识别附件类型
 from dataclasses import dataclass
 from email import message_from_bytes
 from email.header import decode_header
@@ -65,14 +66,21 @@ def decode_str(s):
     decoded = []
     for value, charset in parts:
         if isinstance(value, bytes):
-            value = value.decode(charset if charset else 'utf-8', errors='ignore')
+            # 尝试常见编码
+            if charset:
+                try:
+                    value = value.decode(charset, errors='ignore')
+                except LookupError:
+                    # 如果字符集无法识别，尝试 utf-8 或 gb18030
+                    value = value.decode('gb18030', errors='ignore')
+            else:
+                value = value.decode('utf-8', errors='ignore')
         decoded.append(str(value))
     return re.sub(r'\s+', ' ', "".join(decoded)).strip()
 
 
 def load_config() -> Config:
     if load_dotenv:
-        # Optional; user can create .env locally
         load_dotenv(override=False)
 
     cfg = Config(
@@ -107,12 +115,7 @@ def save_state(state: dict) -> None:
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# def imap_connect(cfg: Config) -> imaplib.IMAP4:
-#     if cfg.imap_ssl:
-#         return imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
-#     return imaplib.IMAP4(cfg.imap_host, cfg.imap_port, timeout=cfg.imap_timeout)
 def imap_connect(cfg: Config):
-    # 逻辑修正：如果配置开启了SSL，或者端口是默认的SSL端口(993)，都强制使用SSL连接
     use_ssl = cfg.imap_ssl or cfg.imap_port == 993
     
     if use_ssl:
@@ -124,10 +127,14 @@ def imap_connect(cfg: Config):
 
 
 def smtp_connect(cfg: Config) -> smtplib.SMTP:
+    # [优化] 增加超时时间到 300秒，防止大附件（如PDF）发送时断开
+    timeout_sec = 300 
+    
     if cfg.smtp_ssl:
         context = ssl.create_default_context()
-        return smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, context=context, timeout=120)
-    server = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=30)
+        return smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, context=context, timeout=timeout_sec)
+    
+    server = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=timeout_sec)
     server.starttls(context=ssl.create_default_context())
     return server
 
@@ -144,59 +151,9 @@ def _ensure_selected(imap: imaplib.IMAP4, folder: str) -> None:
         raise RuntimeError(f"IMAP select failed: {sel}")
 
 
-def _parse_uid_fetch(data) -> bytes:
-    # data is like [(b'123 (RFC822 {..}', b'raw bytes'), b')']
-    for item in data:
-        if isinstance(item, tuple) and len(item) >= 2 and isinstance(item[1], (bytes, bytearray)):
-            return bytes(item[1])
-    raise RuntimeError("IMAP FETCH returned no message bytes")
-
-
-# def _build_forward_message(
-#     cfg: Config,
-#     raw_header: bytes,
-#     raw_body: bytes,
-#     original_uid: str,
-# ) -> EmailMessage:
-#     """构造转发邮件，只包含头部和正文文本，不包含附件"""
-#     # 解析头部
-#     header_msg = message_from_bytes(raw_header, policy=default)
-#     subject = decode_str(header_msg.get('Subject'))
-#     from_info = decode_str(header_msg.get('From'))
-
-#     # 解析正文
-#     temp_msg = message_from_bytes(raw_body, policy=default)
-#     body_part = temp_msg.get_body(preferencelist=('html', 'plain'))
-    
-#     body_content = ""
-#     is_html = False
-#     if body_part:
-#         body_content = body_part.get_content()
-#         is_html = (body_part.get_content_type() == 'text/html')
-#     else:
-#         body_content = "（无法解析正文内容，请登录网页版查看）"
-
-#     # 构造新邮件
-#     forward_msg = EmailMessage()
-#     forward_msg['Subject'] = f"[通知正文] {subject}"
-#     forward_msg['From'] = cfg.smtp_user
-#     forward_msg['To'] = cfg.dest_email
-    
-#     notice = f"--- 学校邮箱转发 (已自动忽略附件以防断连) ---\n发件人: {from_info}\n主题: {subject}\n\n"
-    
-#     if is_html:
-#         header_html = f"<div style='background:#f9f9f9;padding:10px;border:1px solid #eee'><b>发件人:</b> {from_info}<br><b>主题:</b> {subject}<br><i>[提示] 附件已忽略，请至学校邮箱下载</i></div><br>"
-#         forward_msg.add_alternative(header_html + body_content, subtype='html')
-#     else:
-#         forward_msg.set_content(notice + body_content)
-    
-#     return forward_msg
-# 需要引入 mimetypes 库来判断附件类型（在文件开头添加 import mimetypes）
-import mimetypes 
-
 def _build_forward_message(
     cfg: Config,
-    raw_bytes: bytes,  # 这里接收完整的原始字节
+    raw_bytes: bytes,
     original_uid: str,
 ) -> EmailMessage:
     """构造转发邮件，包含附件"""
@@ -213,64 +170,63 @@ def _build_forward_message(
     forward_msg['To'] = cfg.dest_email
     
     # 3. 提取正文并添加到新邮件
-    # 尝试优先获取 HTML，其次是纯文本
     body_part = original_msg.get_body(preferencelist=('html', 'plain'))
     
     notice_text = f"<p style='color:gray;font-size:12px;'>--- 原始发件人: {from_info} ---</p><hr>"
     
     if body_part:
-        content = body_part.get_content()
-        ctype = body_part.get_content_type()
-        if ctype == 'text/html':
-            forward_msg.add_alternative(notice_text + content, subtype='html')
-        else:
-            # 纯文本处理
-            forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n\n" + content)
+        try:
+            content = body_part.get_content()
+            ctype = body_part.get_content_type()
+            if ctype == 'text/html':
+                forward_msg.add_alternative(notice_text + content, subtype='html')
+            else:
+                forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n\n" + content)
+        except Exception as e:
+            logging.warning(f"Error extracting body content: {e}")
+            forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n(正文解析异常，请查看附件或原邮件)")
     else:
         forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n(无正文内容)")
 
     # 4. 遍历并处理附件
     for part in original_msg.walk():
-        # 跳过 multipart 容器本身
         if part.get_content_maintype() == 'multipart':
             continue
-        # 跳过正文部分（因为上面已经处理过了）
         if part == body_part:
             continue
             
         filename = part.get_filename()
         if filename:
-            # 解码文件名
             filename = decode_str(filename)
-            
-            # 获取附件内容
             payload = part.get_payload(decode=True)
+            
             if payload:
-                # 猜测 MIME 类型
-                ctype = part.get_content_type()
-                maintype, subtype = ctype.split('/', 1)
+                # [关键优化] 优先使用文件名猜测 MIME 类型 (修复 PDF 问题)
+                ctype, encoding = mimetypes.guess_type(filename)
                 
-                # 如果猜测失败，给默认值
-                if not maintype: maintype = 'application'
-                if not subtype: subtype = 'octet-stream'
+                if ctype is None:
+                    # 猜不到再用原来的
+                    ctype = part.get_content_type()
                 
-                # 添加附件到新邮件
+                if '/' in ctype:
+                    maintype, subtype = ctype.split('/', 1)
+                else:
+                    maintype, subtype = 'application', 'octet-stream'
+                
+                # 添加附件
                 forward_msg.add_attachment(
                     payload,
                     maintype=maintype,
                     subtype=subtype,
                     filename=filename
                 )
-                logging.info(f"Attached file: {filename}")
+                logging.info(f"Attached file: {filename} as {maintype}/{subtype}")
 
     return forward_msg
 
 
 def _uids_to_process(imap: imaplib.IMAP4, folder: str, last_uid: Optional[int]) -> list[int]:
-    """搜索未读邮件，不管 last_uid 是否存在"""
     _ensure_selected(imap, folder)
-
-    # 始终搜索未读邮件，与测试文件逻辑保持一致
     typ, data = imap.uid("search", None, "UNSEEN")
 
     if typ != "OK":
@@ -284,45 +240,40 @@ def _uids_to_process(imap: imaplib.IMAP4, folder: str, last_uid: Optional[int]) 
     return [int(x) for x in raw.split() if x.isdigit()]
 
 
-# def _imap_fetch_header_and_text(imap: imaplib.IMAP4, uid: int) -> tuple[bytes, bytes]:
-#     """只获取邮件头部和正文文本，不获取附件"""
-#     typ, data = imap.uid("fetch", str(uid), "(BODY.PEEK[HEADER] BODY.PEEK[TEXT])")
-#     if typ != "OK":
-#         raise RuntimeError(f"IMAP fetch failed for uid={uid}: {(typ, data)}")
-    
-#     raw_header = b""
-#     raw_body = b""
-#     for part in data:
-#         if isinstance(part, tuple):
-#             if b'HEADER' in part[0]:
-#                 raw_header = part[1]
-#             elif b'TEXT' in part[0]:
-#                 raw_body = part[1]
-    
-#     return raw_header, raw_body
 def _build_forward_message_no_attachment(
     cfg: Config,
     raw_header: bytes,
     raw_body: bytes,
     original_uid: str,
 ) -> EmailMessage:
-    """构造转发邮件，只包含头部和正文文本，不包含附件"""
+    """构造转发邮件，只包含头部和正文文本"""
     # 解析头部
     header_msg = message_from_bytes(raw_header, policy=default)
     subject = decode_str(header_msg.get('Subject'))
     from_info = decode_str(header_msg.get('From'))
 
-    # 解析正文
-    temp_msg = message_from_bytes(raw_body, policy=default)
-    body_part = temp_msg.get_body(preferencelist=('html', 'plain'))
-    
+    # [修复] 这里的 raw_body 通常是纯文本流，不是 MIME 结构，不能用 message_from_bytes 解析
+    # 直接尝试解码内容
     body_content = ""
+    decoded_success = False
+    
+    # 尝试解码顺序: utf-8 -> gb18030 -> iso-8859-1
+    for enc in ['utf-8', 'gb18030', 'iso-8859-1']:
+        try:
+            body_content = raw_body.decode(enc)
+            decoded_success = True
+            break
+        except Exception:
+            continue
+    
+    if not decoded_success:
+        # 最后尝试忽略错误解码
+        body_content = raw_body.decode('utf-8', errors='ignore')
+
+    # 简单判断是否为 HTML
     is_html = False
-    if body_part:
-        body_content = body_part.get_content()
-        is_html = (body_part.get_content_type() == 'text/html')
-    else:
-        body_content = "（无法解析正文内容，请登录网页版查看）"
+    if "<html" in body_content.lower() or "<div" in body_content.lower() or "<body" in body_content.lower():
+        is_html = True
 
     # 构造新邮件
     forward_msg = EmailMessage()
@@ -330,10 +281,11 @@ def _build_forward_message_no_attachment(
     forward_msg['From'] = cfg.smtp_user
     forward_msg['To'] = cfg.dest_email
     
-    notice = "--- 学校邮箱转发 (已自动忽略附件以防断连) ---\n" + "发件人: " + from_info + "\n" + "主题: " + subject + "\n\n"
+    notice = f"--- 学校邮箱转发 (附件发送失败，仅转发正文) ---\n发件人: {from_info}\n主题: {subject}\n\n"
     
     if is_html:
-        header_html = "<div style='background:#f9f9f9;padding:10px;border:1px solid #eee'><b>发件人:</b> " + from_info + "<br><b>主题:</b> " + subject + "<br><i>[提示] 附件已忽略，请至学校邮箱下载</i></div><br>"
+        header_html = f"<div style='background:#f9f9f9;padding:10px;border:1px solid #eee;color:red'><b>发件人:</b> {from_info}<br><b>主题:</b> {subject}<br><i>[警告] 附件发送失败（可能因文件过大或网络超时），请登录学校邮箱下载。以下为识别到的正文：</i></div><hr><br>"
+        # 如果是 HTML，尽量保留原样
         forward_msg.add_alternative(header_html + body_content, subtype='html')
     else:
         forward_msg.set_content(notice + body_content)
@@ -342,53 +294,55 @@ def _build_forward_message_no_attachment(
 
 
 def _imap_fetch_header_and_text(imap: imaplib.IMAP4, uid: int) -> tuple[bytes, bytes]:
-    """只获取邮件头部和正文文本，不获取附件"""
+    """只获取邮件头部和正文文本"""
+    # 获取 HEADER 和 TEXT 部分
     typ, data = imap.uid("fetch", str(uid), "(BODY.PEEK[HEADER] BODY.PEEK[TEXT])")
     if typ != "OK":
         raise RuntimeError(f"IMAP fetch failed for uid={uid}: {(typ, data)}")
     
     raw_header = b""
     raw_body = b""
-    for part in data:
-        if isinstance(part, tuple):
-            if b'HEADER' in part[0]:
-                raw_header = part[1]
-            elif b'TEXT' in part[0]:
-                raw_body = part[1]
+    
+    # IMAP 返回的数据结构比较复杂，可能是列表嵌套元组
+    # 格式通常是: [(b'uid (BODY[HEADER] {len}', b'Header Content'), b' (BODY[TEXT] {len}', b'Body Content'), b')']
+    # 或者是分开的条目
+    for item in data:
+        if isinstance(item, tuple) and len(item) >= 2:
+            key = item[0]
+            val = item[1]
+            if b'HEADER' in key:
+                raw_header = val
+            elif b'TEXT' in key:
+                raw_body = val
     
     return raw_header, raw_body
 
 
 def _imap_fetch_full_message(imap: imaplib.IMAP4, uid: int) -> bytes:
-    """获取完整邮件内容（包含附件）"""
-    # RFC822 代表获取邮件的原始完整数据
     typ, data = imap.uid("fetch", str(uid), "(RFC822)")
     if typ != "OK":
         raise RuntimeError(f"IMAP fetch failed for uid={uid}: {(typ, data)}")
     
-    # 解析返回的数据结构，通常 data[0] 是 (b'uid (RFC822 {size}', b'raw content')
     for item in data:
         if isinstance(item, tuple) and len(item) >= 2:
-            return item[1] # 返回原始字节流
+            return item[1] 
     raise RuntimeError("IMAP FETCH returned no message bytes")
 
 
 def _imap_mark_forwarded(imap: imaplib.IMAP4, uid: int) -> None:
-    """标记邮件为已读，不使用自定义标记以避免服务器错误"""
     imap.uid("store", str(uid), "+FLAGS", r"(\Seen)")
 
 
 def process_once(cfg: Config) -> int:
-    """处理一次邮件转发任务"""
     state = load_state()
     state_key = f"{cfg.src_email}:{cfg.imap_host}:{cfg.imap_folder}"
     last_uid = state.get(state_key)
     last_uid_int = int(last_uid) if isinstance(last_uid, int) or (isinstance(last_uid, str) and last_uid.isdigit()) else None
 
     forwarded = 0
-
     imap = None
     smtp = None
+    
     try:
         imap = imap_connect(cfg)
         imap.login(cfg.src_email, cfg.src_password)
@@ -401,27 +355,17 @@ def process_once(cfg: Config) -> int:
         smtp = smtp_connect(cfg)
         smtp.login(cfg.smtp_user, cfg.smtp_password)
 
-        # 处理最新的邮件
         for uid in uids:
             attempts = 0
             success = False
             while attempts < 3 and not success:
                 attempts += 1
                 try:
-                    # # 使用新的获取方式，只获取头部和正文文本
-                    # # raw_header, raw_body = _imap_fetch_header_and_text(imap, uid)
-                    # [修改] 获取完整邮件数据
+                    # 尝试1: 完整获取并转发
                     raw_bytes = _imap_fetch_full_message(imap, uid)
-                    
-                    # 构造转发邮件
-                    # fwd = _build_forward_message(cfg, raw_header, raw_body, original_uid=str(uid))
-                    # [修改] 构造包含附件的转发邮件
                     fwd = _build_forward_message(cfg, raw_bytes, original_uid=str(uid))
-                    
-                    # 发送邮件
                     smtp.send_message(fwd)
                     
-                    # 成功后标记为已读
                     _imap_mark_forwarded(imap, uid)
                     forwarded += 1
 
@@ -432,80 +376,33 @@ def process_once(cfg: Config) -> int:
 
                     logging.info("Forwarded uid=%s (attempt %d)", uid, attempts)
                     success = True
-                except imaplib.IMAP4.abort as e:
-                    logging.warning("IMAP aborted on uid=%s with attachments attempt=%d: %s", uid, attempts, e)
                     
-                    # 如果是第一次失败，尝试降级处理：只转发标题和正文
+                except (imaplib.IMAP4.abort, smtplib.SMTPException, OSError) as e:
+                    # 如果是网络中断或发送错误
+                    logging.warning("Error on uid=%s with attachments attempt=%d: %s", uid, attempts, e)
+                    
+                    # 第一次失败后，立即尝试【降级模式】：只转发正文
                     if attempts == 1:
-                        logging.info("Attempting to forward without attachments for uid=%s", uid)
+                        logging.info("Attempting to forward without attachments (Fallback) for uid=%s", uid)
                         try:
-                            # 重新连接 IMAP
-                            try:
-                                imap.logout()
-                            except Exception:
-                                pass
+                            # 重置连接以防连接已死
+                            try: imap.logout() 
+                            except: pass
+                            try: smtp.quit() 
+                            except: pass
+                            
                             imap = imap_connect(cfg)
                             imap.login(cfg.src_email, cfg.src_password)
                             _ensure_selected(imap, cfg.imap_folder)
                             
-                            # 获取邮件头部和正文文本
-                            raw_header, raw_body = _imap_fetch_header_and_text(imap, uid)
-                            
-                            # 重新连接 SMTP
-                            try:
-                                smtp.quit()
-                            except Exception:
-                                pass
                             smtp = smtp_connect(cfg)
                             smtp.login(cfg.smtp_user, cfg.smtp_password)
                             
-                            # 构造无附件的转发邮件
-                            fwd = _build_forward_message_no_attachment(cfg, raw_header, raw_body, original_uid=str(uid))
-                            
-                            # 发送邮件
-                            smtp.send_message(fwd)
-                            
-                            # 成功后标记为已读
-                            _imap_mark_forwarded(imap, uid)
-                            forwarded += 1
-
-                            if last_uid_int is None or uid > last_uid_int:
-                                last_uid_int = uid
-                                state[state_key] = last_uid_int
-                                save_state(state)
-
-                            logging.info("Forwarded uid=%s without attachments (attempt %d)", uid, attempts)
-                            success = True
-                        except Exception as e2:
-                            logging.exception("Failed forwarding uid=%s without attachments: %s", uid, e2)
-                            time.sleep(1)
-                    else:
-                        # 重新连接 IMAP
-                        try:
-                            imap.logout()
-                        except Exception:
-                            pass
-                        imap = imap_connect(cfg)
-                        imap.login(cfg.src_email, cfg.src_password)
-                        _ensure_selected(imap, cfg.imap_folder)
-                        time.sleep(1)
-                except Exception as e:
-                    logging.exception("Failed forwarding uid=%s with attachments attempt=%d: %s", uid, attempts, e)
-                    
-                    # 如果是第一次失败，尝试降级处理：只转发标题和正文
-                    if attempts == 1:
-                        logging.info("Attempting to forward without attachments for uid=%s", uid)
-                        try:
-                            # 获取邮件头部和正文文本
+                            # 获取简化内容
                             raw_header, raw_body = _imap_fetch_header_and_text(imap, uid)
-                            
-                            # 构造无附件的转发邮件
                             fwd = _build_forward_message_no_attachment(cfg, raw_header, raw_body, original_uid=str(uid))
                             
-                            # 发送邮件
                             smtp.send_message(fwd)
-                            
-                            # 成功后标记为已读
                             _imap_mark_forwarded(imap, uid)
                             forwarded += 1
 
@@ -514,36 +411,35 @@ def process_once(cfg: Config) -> int:
                                 state[state_key] = last_uid_int
                                 save_state(state)
 
-                            logging.info("Forwarded uid=%s without attachments (attempt %d)", uid, attempts)
+                            logging.info("Fallback Success: Forwarded uid=%s without attachments.", uid)
                             success = True
                         except Exception as e2:
-                            logging.exception("Failed forwarding uid=%s without attachments: %s", uid, e2)
-                            time.sleep(1)
+                            logging.exception("Fallback failed for uid=%s: %s", uid, e2)
+                            time.sleep(2)
                     else:
-                        time.sleep(1)
+                        # 超过1次尝试且不是fallback路径，简单的休眠重试
+                        time.sleep(2)
+                except Exception as e:
+                    # 其他未知错误
+                    logging.exception("Unexpected error uid=%s: %s", uid, e)
+                    time.sleep(2)
 
             if not success:
-                # Skip this UID to avoid blocking subsequent messages
                 last_uid_int = uid
                 state[state_key] = last_uid_int
                 save_state(state)
-                logging.warning("Skipped uid=%s after %d failed attempt(s)", uid, attempts)
+                logging.warning("Skipped uid=%s after failed attempts", uid)
             
-            # 增加延迟，降低频率
             time.sleep(3)
 
         return forwarded
     finally:
         try:
-            if smtp is not None:
-                smtp.quit()
-        except Exception:
-            pass
+            if smtp: smtp.quit()
+        except: pass
         try:
-            if imap is not None:
-                imap.logout()
-        except Exception:
-            pass
+            if imap: imap.logout()
+        except: pass
 
 
 def main() -> None:
@@ -569,7 +465,11 @@ def main() -> None:
     while True:
         try:
             n = process_once(cfg)
-            logging.info("Cycle done. Forwarded %d message(s). Sleeping...", n)
+            if n > 0:
+                logging.info("Cycle done. Forwarded %d message(s).", n)
+            else:
+                # 只有当没有处理邮件时才打印 debug 或者是 silent
+                pass 
         except Exception as e:
             logging.exception("Cycle failed: %s. Sleeping...", e)
         time.sleep(cfg.poll_interval_seconds)
