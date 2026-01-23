@@ -232,34 +232,34 @@ def _build_forward_message(
     # 4. 遍历并处理附件
     # 遍历并处理附件
     for part in original_msg.walk():
-    if part.get_content_maintype() == 'multipart':
-        continue
-    if part == body_part:
-        continue
-
-    filename = part.get_filename()
-    if filename:
-        filename = decode_str(filename)
-        payload = part.get_payload(decode=True)
-        if payload:
-            # PDF 特殊处理：确保 MIME 类型正确
-            ctype = part.get_content_type()
-            maintype, subtype = ctype.split('/', 1)
-            
-            # 如果是 PDF，强制使用 application/pdf
-            if filename.lower().endswith('.pdf'):
-                maintype, subtype = 'application', 'pdf'
-
-            if not maintype: maintype = 'application'
-            if not subtype: subtype = 'octet-stream'
-
-            forward_msg.add_attachment(
-                payload,
-                maintype=maintype,
-                subtype=subtype,
-                filename=filename
-            )
-            logging.info(f"Attached file: {filename}")
+        if part.get_content_maintype() == 'multipart':
+            continue
+        if part == body_part:
+            continue
+    
+        filename = part.get_filename()
+        if filename:
+            filename = decode_str(filename)
+            payload = part.get_payload(decode=True)
+            if payload:
+                # PDF 特殊处理：确保 MIME 类型正确
+                ctype = part.get_content_type()
+                maintype, subtype = ctype.split('/', 1)
+                
+                # 如果是 PDF，强制使用 application/pdf
+                if filename.lower().endswith('.pdf'):
+                    maintype, subtype = 'application', 'pdf'
+    
+                if not maintype: maintype = 'application'
+                if not subtype: subtype = 'octet-stream'
+    
+                forward_msg.add_attachment(
+                    payload,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=filename
+                )
+                logging.info(f"Attached file: {filename}")
             
     return forward_msg
 
