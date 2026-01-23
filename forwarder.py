@@ -21,7 +21,7 @@ def load_config():
         'imap_folder': os.environ.get('IMAP_FOLDER', 'INBOX'),
         'src_email': os.environ['SRC_EMAIL'],
         'src_password': os.environ['SRC_PASSWORD'],
-        'dst_email': os.environ['DST_EMAIL'],
+        'dst_email': os.environ['DEST_EMAIL'],
         'smtp_host': os.environ.get('SMTP_HOST', 'smtp.qq.com'),
         'smtp_port': int(os.environ.get('SMTP_PORT', 465)),
     }
