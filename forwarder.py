@@ -247,48 +247,94 @@ def _build_forward_message_no_attachment(
     original_uid: str,
 ) -> EmailMessage:
     """构造转发邮件，只包含头部和正文文本"""
-    # 解析头部
-    header_msg = message_from_bytes(raw_header, policy=default)
-    subject = decode_str(header_msg.get('Subject'))
-    from_info = decode_str(header_msg.get('From'))
+    
+    # 1. 尝试将 header 和 body 组合成一个完整的邮件对象进行解析
+    # 这样 Python 就能自动识别 MIME 结构，把 base64 自动转回中文
+    try:
+        # 补全中间的空行以符合 RFC 822 标准
+        full_msg_bytes = raw_header + b"\r\n" + raw_body
+        original_msg = message_from_bytes(full_msg_bytes, policy=default)
+    except Exception:
+        # 如果解析失败，回退到原来的简单拼接逻辑
+        original_msg = None
 
-    # [修复] 这里的 raw_body 通常是纯文本流，不是 MIME 结构，不能用 message_from_bytes 解析
-    # 直接尝试解码内容
+    # 提取头部信息
+    if original_msg:
+        subject = decode_str(original_msg.get('Subject'))
+        from_info = decode_str(original_msg.get('From'))
+    else:
+        # 如果解析挂了，手动解 Header
+        header_msg = message_from_bytes(raw_header, policy=default)
+        subject = decode_str(header_msg.get('Subject'))
+        from_info = decode_str(header_msg.get('From'))
+
+    # 2. 提取正文 (核心修复点)
     body_content = ""
-    decoded_success = False
-    
-    # 尝试解码顺序: utf-8 -> gb18030 -> iso-8859-1
-    for enc in ['utf-8', 'gb18030', 'iso-8859-1']:
-        try:
-            body_content = raw_body.decode(enc)
-            decoded_success = True
-            break
-        except Exception:
-            continue
-    
-    if not decoded_success:
-        # 最后尝试忽略错误解码
-        body_content = raw_body.decode('utf-8', errors='ignore')
-
-    # 简单判断是否为 HTML
     is_html = False
-    if "<html" in body_content.lower() or "<div" in body_content.lower() or "<body" in body_content.lower():
-        is_html = True
+    
+    if original_msg:
+        # 优先寻找 HTML 或 纯文本
+        body_part = original_msg.get_body(preferencelist=('html', 'plain'))
+        if body_part:
+            try:
+                # get_content() 会自动处理 base64 和 charset 解码
+                body_content = body_part.get_content()
+                if body_part.get_content_type() == 'text/html':
+                    is_html = True
+            except Exception as e:
+                logging.warning(f"Failed to extract content from body part: {e}")
+        
+        # 如果 get_body 没找到（有时候结构很奇怪），手动遍历
+        if not body_content:
+            for part in original_msg.walk():
+                if part.get_content_maintype() == 'text':
+                    try:
+                        body_content = part.get_content()
+                        if part.get_content_type() == 'text/html':
+                            is_html = True
+                        break # 找到第一个文本就停止
+                    except:
+                        continue
 
-    # 构造新邮件
+    # 3. 如果上述解析彻底失败（兜底逻辑），才使用之前的暴力解码
+    if not body_content:
+        # 之前的逻辑，作为最后的救命稻草
+        for enc in ['utf-8', 'gb18030', 'iso-8859-1']:
+            try:
+                body_content = raw_body.decode(enc)
+                break
+            except Exception:
+                continue
+        if not body_content:
+            body_content = raw_body.decode('utf-8', errors='ignore')
+        
+        # 简单判断 html
+        if "<html" in body_content.lower() or "<div" in body_content.lower():
+            is_html = True
+
+    # 4. 构造新邮件
     forward_msg = EmailMessage()
     forward_msg['Subject'] = f"[通知正文] {subject}"
     forward_msg['From'] = cfg.smtp_user
     forward_msg['To'] = cfg.dest_email
     
-    notice = f"--- 学校邮箱转发 (附件发送失败，仅转发正文) ---\n发件人: {from_info}\n主题: {subject}\n\n"
+    # 优化提示文案
+    notice_plain = f"--- 学校邮箱转发 (附件发送异常，仅提取正文) ---\n发件人: {from_info}\n主题: {subject}\n\n"
+    notice_html = f"""
+    <div style='background:#fff0f0;padding:12px;border:1px solid #fcc;color:#a00;margin-bottom:15px;border-radius:4px;'>
+        <b>[系统提示]</b> 附件发送失败（可能文件过大或网络超时），已自动为您提取邮件正文。<br>
+        <b>原始发件人:</b> {from_info}<br>
+        <b>原始主题:</b> {subject}
+    </div>
+    <hr>
+    """
     
     if is_html:
-        header_html = f"<div style='background:#f9f9f9;padding:10px;border:1px solid #eee;color:red'><b>发件人:</b> {from_info}<br><b>主题:</b> {subject}<br><i>[警告] 附件发送失败（可能因文件过大或网络超时），请登录学校邮箱下载。以下为识别到的正文：</i></div><hr><br>"
-        # 如果是 HTML，尽量保留原样
-        forward_msg.add_alternative(header_html + body_content, subtype='html')
+        # 如果是 HTML，把提示加在最前面
+        # 注意：这里我们假设 body_content 已经是解码后的字符串
+        forward_msg.add_alternative(notice_html + body_content, subtype='html')
     else:
-        forward_msg.set_content(notice + body_content)
+        forward_msg.set_content(notice_plain + body_content)
     
     return forward_msg
 
