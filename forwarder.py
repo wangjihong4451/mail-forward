@@ -231,37 +231,39 @@ def _build_forward_message(
 
     # 4. 遍历并处理附件
     for part in original_msg.walk():
-        # 跳过 multipart 容器本身
         if part.get_content_maintype() == 'multipart':
             continue
-        # 跳过正文部分（因为上面已经处理过了）
-        if part == body_part:
+    
+        ctype = part.get_content_type()
+        disp = part.get_content_disposition()  # attachment / inline / None
+    
+        # 跳过正文
+        if ctype in ('text/plain', 'text/html'):
             continue
-            
+    
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+    
+        # 文件名兜底策略（非常关键）
         filename = part.get_filename()
         if filename:
-            # 解码文件名
             filename = decode_str(filename)
-            
-            # 获取附件内容
-            payload = part.get_payload(decode=True)
-            if payload:
-                # 猜测 MIME 类型
-                ctype = part.get_content_type()
-                maintype, subtype = ctype.split('/', 1)
-                
-                # 如果猜测失败，给默认值
-                if not maintype: maintype = 'application'
-                if not subtype: subtype = 'octet-stream'
-                
-                # 添加附件到新邮件
-                forward_msg.add_attachment(
-                    payload,
-                    maintype=maintype,
-                    subtype=subtype,
-                    filename=filename
-                )
-                logging.info(f"Attached file: {filename}")
+        else:
+            # 没有 filename，但像 PDF、DOC 这种也要转
+            ext = mimetypes.guess_extension(ctype) or '.bin'
+            filename = f'attachment_{uid}{ext}'
+    
+        maintype, subtype = ctype.split('/', 1)
+    
+        forward_msg.add_attachment(
+            payload,
+            maintype=maintype,
+            subtype=subtype,
+            filename=filename
+        )
+    
+        logging.info(f"Attached file: {filename} ({ctype}, {disp})")
 
     return forward_msg
 
