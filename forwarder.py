@@ -82,7 +82,7 @@ def load_config() -> Config:
         imap_port=_env_int("IMAP_PORT", 993),
         imap_ssl=_env_bool("IMAP_SSL", True),
         imap_folder=os.getenv("IMAP_FOLDER", "INBOX"),
-        imap_timeout=_env_int("IMAP_TIMEOUT", 120),
+        imap_timeout=_env_int("IMAP_TIMEOUT", 300),
         smtp_user=os.environ["SMTP_USER"],
         smtp_password=os.environ["SMTP_PASSWORD"],
         smtp_host=os.environ["SMTP_HOST"],
