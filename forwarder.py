@@ -156,7 +156,7 @@ def _build_forward_message(
     raw_bytes: bytes,
     original_uid: str,
 ) -> EmailMessage:
-    """构造转发邮件，包含附件"""
+    """构造转发邮件，包含附件（增强版：针对 PDF 和文件名修复）"""
     # 1. 解析原始邮件
     original_msg = message_from_bytes(raw_bytes, policy=default)
     
@@ -169,7 +169,7 @@ def _build_forward_message(
     forward_msg['From'] = cfg.smtp_user
     forward_msg['To'] = cfg.dest_email
     
-    # 3. 提取正文并添加到新邮件
+    # 3. 提取正文
     body_part = original_msg.get_body(preferencelist=('html', 'plain'))
     
     notice_text = f"<p style='color:gray;font-size:12px;'>--- 原始发件人: {from_info} ---</p><hr>"
@@ -182,45 +182,74 @@ def _build_forward_message(
                 forward_msg.add_alternative(notice_text + content, subtype='html')
             else:
                 forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n\n" + content)
-        except Exception as e:
-            logging.warning(f"Error extracting body content: {e}")
-            forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n(正文解析异常，请查看附件或原邮件)")
+        except Exception:
+            forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n(正文解析异常，请查看附件)")
     else:
         forward_msg.set_content(f"--- 原始发件人: {from_info} ---\n(无正文内容)")
 
-    # 4. 遍历并处理附件
+    # 4. 遍历并处理附件 (核心修改部分)
+    attachment_count = 0
+    
     for part in original_msg.walk():
+        # 跳过 multipart 容器
         if part.get_content_maintype() == 'multipart':
             continue
+        # 跳过正文本身
         if part == body_part:
             continue
             
+        # 获取文件名
         filename = part.get_filename()
+        
+        # 针对某些 PDF 只有 Content-Type 但没有 Content-Disposition filename 的情况
+        # 或者 filename 解码失败的情况，我们手动赋予一个名字
+        original_ctype = part.get_content_type().lower()
+        
+        # 如果没有文件名，但是类型是 PDF，强制生成一个文件名
+        if not filename and 'pdf' in original_ctype:
+            filename = f"document_{attachment_count}.pdf"
+        
         if filename:
+            # 解码文件名
             filename = decode_str(filename)
+            
+            # 获取附件二进制内容
             payload = part.get_payload(decode=True)
             
             if payload:
-                # [关键优化] 优先使用文件名猜测 MIME 类型 (修复 PDF 问题)
+                attachment_count += 1
+                
+                # --- 核心修复：MIME 类型判定逻辑 ---
+                # 1. 先用 mimetypes 根据后缀猜 (最准确)
                 ctype, encoding = mimetypes.guess_type(filename)
                 
-                if ctype is None:
-                    # 猜不到再用原来的
-                    ctype = part.get_content_type()
+                # 2. 如果猜不到，或者猜出来不是 PDF 但原邮件说是 PDF，则信原邮件
+                if (ctype is None) or ('pdf' in original_ctype and 'pdf' not in str(ctype)):
+                    # 如果原邮件明确说是 pdf，那就用 application/pdf
+                    if 'pdf' in original_ctype:
+                        ctype = 'application/pdf'
+                    else:
+                        # 否则沿用原邮件类型
+                        ctype = original_ctype
                 
-                if '/' in ctype:
-                    maintype, subtype = ctype.split('/', 1)
-                else:
-                    maintype, subtype = 'application', 'octet-stream'
+                # 3. 兜底：如果还是空的，给默认值
+                if not ctype or '/' not in ctype:
+                    ctype = 'application/octet-stream'
                 
-                # 添加附件
-                forward_msg.add_attachment(
-                    payload,
-                    maintype=maintype,
-                    subtype=subtype,
-                    filename=filename
-                )
-                logging.info(f"Attached file: {filename} as {maintype}/{subtype}")
+                maintype, subtype = ctype.split('/', 1)
+                
+                try:
+                    forward_msg.add_attachment(
+                        payload,
+                        maintype=maintype,
+                        subtype=subtype,
+                        filename=filename
+                    )
+                    logging.info(f"Attached: {filename} ({maintype}/{subtype})")
+                except Exception as e:
+                    logging.error(f"Failed to attach {filename}: {e}")
+                    # 如果添加附件失败，不要让整个邮件发送失败，继续处理下一个附件
+                    continue
 
     return forward_msg
 
