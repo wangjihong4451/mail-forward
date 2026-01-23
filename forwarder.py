@@ -238,8 +238,8 @@ def _build_forward_message(
         disp = part.get_content_disposition()  # attachment / inline / None
     
         # 跳过正文
-        if ctype in ('text/plain', 'text/html'):
-            continue
+        if ctype in ('text/plain', 'text/html') and disp != 'attachment':
+             continue
     
         payload = part.get_payload(decode=True)
         if not payload:
@@ -252,7 +252,7 @@ def _build_forward_message(
         else:
             # 没有 filename，但像 PDF、DOC 这种也要转
             ext = mimetypes.guess_extension(ctype) or '.bin'
-            filename = f'attachment_{uid}{ext}'
+            filename = f'attachment_{original_uid}{ext}'
     
         maintype, subtype = ctype.split('/', 1)
     
@@ -285,23 +285,6 @@ def _uids_to_process(imap: imaplib.IMAP4, folder: str, last_uid: Optional[int]) 
         return []
     return [int(x) for x in raw.split() if x.isdigit()]
 
-
-# def _imap_fetch_header_and_text(imap: imaplib.IMAP4, uid: int) -> tuple[bytes, bytes]:
-#     """只获取邮件头部和正文文本，不获取附件"""
-#     typ, data = imap.uid("fetch", str(uid), "(BODY.PEEK[HEADER] BODY.PEEK[TEXT])")
-#     if typ != "OK":
-#         raise RuntimeError(f"IMAP fetch failed for uid={uid}: {(typ, data)}")
-    
-#     raw_header = b""
-#     raw_body = b""
-#     for part in data:
-#         if isinstance(part, tuple):
-#             if b'HEADER' in part[0]:
-#                 raw_header = part[1]
-#             elif b'TEXT' in part[0]:
-#                 raw_body = part[1]
-    
-#     return raw_header, raw_body
 def _build_forward_message_no_attachment(
     cfg: Config,
     raw_header: bytes,
@@ -409,15 +392,8 @@ def process_once(cfg: Config) -> int:
             success = False
             while attempts < 3 and not success:
                 attempts += 1
-                try:
-                    # # 使用新的获取方式，只获取头部和正文文本
-                    # # raw_header, raw_body = _imap_fetch_header_and_text(imap, uid)
-                    # [修改] 获取完整邮件数据
-                    raw_bytes = _imap_fetch_full_message(imap, uid)
-                    
-                    # 构造转发邮件
-                    # fwd = _build_forward_message(cfg, raw_header, raw_body, original_uid=str(uid))
-                    # [修改] 构造包含附件的转发邮件
+                try:      
+                    raw_bytes = _imap_fetch_full_message(imap, uid)  
                     fwd = _build_forward_message(cfg, raw_bytes, original_uid=str(uid))
                     
                     # 发送邮件
